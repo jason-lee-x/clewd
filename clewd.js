@@ -27,7 +27,7 @@ let uuidOrg, curPrompt = {}, prevPrompt = {}, prevMessages = [], prevImpersonate
     Settings: {
         RenewAlways: true,
         RetryRegenerate: false,
-        PromptExperiments: true,
+        PromptExperiments: false,
         SystemExperiments: true,
         PreventImperson: true,
         AllSamples: false,
@@ -77,32 +77,39 @@ const updateParams = res => {
         const cookieName = divide[1], cookieVal = divide[2];
         cookies[cookieName] = cookieVal;
     }
-}, getCookies = () => {
-    const cookieNames = Object.keys(cookies);
-    return cookieNames.map(((name, idx) => `${name}=${cookies[name]}${idx === cookieNames.length - 1 ? '' : ';'}`)).join(' ').replace(/(\s+)$/gi, '');
-}, deleteChat = async uuid => {
-    if (!uuid) {
-        return;
-    }
-    if (uuid === Conversation.uuid) {
+}, getCookies = (extra = {}) => {
+    const copy = {
+        ...cookies,
+        ...extra
+    }, cookieNames = Object.keys(copy);
+    return cookieNames.map(((name, idx) => `${decodeURIComponent(name)}=${encodeURIComponent(decodeURIComponent(copy[name]))}${idx === cookieNames.length - 1 ? '' : ';'}`)).join(' ').replace(/(\s+)$/gi, '');
+}, deleteChat = async (uuids = []) => {
+    if (uuids.includes(Conversation.uuid)) {
         Conversation.uuid = null;
         Conversation.depth = 0;
     }
     if (Config.Settings.PreserveChats) {
         return;
     }
-    const res = await (Config.Settings.Superfetch ? Superfetch : fetch)(`${AI.end}/api/organizations/${uuidOrg}/chat_conversations/${uuid}`, {
+    const deleteRes = await (Config.Settings.Superfetch ? Superfetch : fetch)(`${AI.end}/api/organizations/${uuidOrg}/chat_conversations/delete_many`, {
         headers: {
             ...AI.hdr(),
             Cookie: getCookies()
         },
-        method: 'DELETE'
+        method: 'POST',
+        body: JSON.stringify({
+            conversation_uuids: uuids
+        })
     });
-    updateParams(res);
-    return res.status;
+    updateParams(deleteRes);
+    await checkResErr(deleteRes);
+    return await deleteRes.json();
 }, onListen = async () => {
     if ('SET YOUR COOKIE HERE' === Config.Cookie || Config.Cookie?.length < 1) {
         throw Error('Set your cookie inside config.js');
+    }
+    if (false === Config.Settings.RenewAlways || Config.Settings.RetryRegenerate) {
+        throw Error('RenewAlways: false or RetryRegenerate: true are not supported at the moment');
     }
     updateCookies(Config.Cookie);
     console.log(`[2m${Main}[0m\n[33mhttp://${Config.Ip}:${Config.Port}/v1[0m\n\n${Object.keys(Config.Settings).map((setting => UnknownSettings.includes(setting) ? `??? [31m${setting}: ${Config.Settings[setting]}[0m` : `[1m${setting}:[0m ${ChangedSettings.includes(setting) ? '[33m' : '[36m'}${Config.Settings[setting]}[0m`)).sort().join('\n')}\n`);
@@ -113,35 +120,43 @@ const updateParams = res => {
     const accInfo = await (async () => {
         const headers = {
             ...AI.hdr(),
-            Cookie: getCookies(),
-            'anthropic-client-sha': 'unknown',
-            'anthropic-client-version': 'unknown'
-        }, accInfoRes = await (Config.Settings.Superfetch ? Superfetch : fetch)(AI.end + '/api/bootstrap', {
+            Cookie: getCookies({
+                'return-to': '/?'
+            }),
+            Referer: AI.end + '/magic-link'
+        }, accInfoRes = await (Config.Settings.Superfetch ? Superfetch : fetch)(AI.end + '/api/bootstrap?statsig_hashing_algorithm=djb2', {
             method: 'GET',
             headers
         });
         await checkResErr(accInfoRes);
-        const accInfoJson = await accInfoRes.json(), accOrgs = accInfoJson?.account?.memberships?.filter((org => org.organization)) || [], name = accInfoJson?.account?.email_address?.split('@')?.[0] || '??', capabilities = accOrgs[0]?.organization?.capabilities;
-        uuidOrg = accOrgs[0]?.organization?.uuid;
-        if (!uuidOrg) {
-            throw Error(`Couldn't find id: "${accInfoJson?.error?.message || accInfoRes.statusText || accInfoRes.status}"`);
-        }
-        if (accOrgs.length < 1) {
-            throw Error(`Couldn't find org: "${accInfoJson?.error?.message || accInfoRes.statusText || accInfoRes.status}"`);
-        }
+        const accInfoJson = await accInfoRes.json();
         updateParams(accInfoRes);
+        const name = accInfoJson?.account?.email_address?.split('@')?.[0] || '??', accOrgs = accInfoJson?.account?.memberships?.filter((org => org.organization));
+        if (!accOrgs?.length > 0) {
+            throw Error(`Failed to fetch essential data (${accInfoJson?.error?.message || accInfoRes.statusText || accInfoRes.status})`);
+        }
+        const chosenOrg = accOrgs.map((({organization, ...rest}) => ({
+            ...organization,
+            ...rest
+        }))).find((org => !org?.api_disabled_reason && !org?.api_disabled_until)), {capabilities, uuid} = chosenOrg;
+        if (!uuid) {
+            throw Error(`Failed to fetch essential data (${accInfoJson?.error?.message || accInfoRes.statusText || accInfoRes.status})`);
+        }
+        uuidOrg = uuid;
         const accStatsig = await (Config.Settings.Superfetch ? Superfetch : fetch)(`${AI.end}/api/account/statsig/${uuidOrg}`, {
             method: 'GET',
-            headers: {
-                ...AI.hdr(),
-                Cookie: getCookies(),
-                'anthropic-client-sha': 'unknown',
-                'anthropic-client-version': 'unknown'
-            }
+            headers
         });
+        updateParams(accStatsig);
         await checkResErr(accStatsig);
-        const accStatsigJson = await accStatsig.json(), type = true === accStatsigJson?.user?.custom?.isPro ? 'pro' : 'free', modelsAll = (accStatsigJson?.values?.dynamic_configs?.['R0FVshL4aI3OcWe2hMvT/3S2I89bAW5B9n0moWX66sA=']?.value?.models || []).map((entry => entry.model));
-        AI.mdl = [ ...new Set([ ...AI.mdl, ...modelsAll ]) ];
+        const accStatsigJson = await accStatsig.json();
+        if (accStatsigJson.error) {
+            throw Error(`Failed to fetch essential data (${accStatsigJson?.error?.message || accStatsig.statusText || accStatsig.status})`);
+        }
+        let type = 'free';
+        accStatsigJson?.user?.custom?.isMax ? type = 'max' : accStatsigJson?.user?.custom?.isRaven ? type = 'raven' : accStatsigJson?.user?.custom?.isPro && (type = 'pro');
+        const modelsAvail = (accStatsigJson?.values?.dynamic_configs?.['R0FVshL4aI3OcWe2hMvT/3S2I89bAW5B9n0moWX66sA=']?.value?.models || []).filter((entry => !('inactive' in entry) || false === entry.inactive));
+        AI.mdl = [ ...new Set([ ...AI.mdl, ...modelsAvail.map((entry => entry.model)) ]) ];
         const modelsInfo = Object.entries(accStatsigJson?.values?.dynamic_configs?.['TZDmWcVIjsdmEcb9XJSbVmhsuJAJiM4wKj0hxOMBraQ=']?.value || {}).map((([name, properties]) => {
             if (!properties[type]?.maxContextSize) {
                 properties[type].maxContextSize = properties[type].hardLimit;
@@ -159,10 +174,6 @@ const updateParams = res => {
             name: assignedModelName,
             ...modelLimits
         };
-        if (!accStatsig || accStatsigJson.error) {
-            throw Error(`Couldn't get account info: "${accStatsigJson?.error?.message || accStatsig.statusText}"`);
-        }
-        updateParams(accStatsig);
         return {
             name,
             type,
@@ -174,16 +185,14 @@ const updateParams = res => {
             method: 'GET',
             headers: {
                 ...AI.hdr(),
-                Cookie: getCookies(),
-                'anthropic-client-sha': 'unknown',
-                'anthropic-client-version': 'unknown'
+                Cookie: getCookies()
             }
-        }), accOrgInfo = (await accOrgRes.json())?.[0];
-        if (!accOrgInfo || accOrgInfo?.error) {
-            throw Error(`Failed to fetch org info: "${accOrgInfo?.error?.message || accOrgRes.statusText}"`);
+        }), accOrgJson = await accOrgRes.json(), accOrgInfo = accOrgJson.find((org => org.uuid = uuidOrg));
+        if (accOrgJson.error) {
+            throw Error(`Failed to check flags (${accOrgJson.error.message || accOrgRes.statusText || accOrgRes.status})`);
         }
-        if (!accOrgInfo?.uuid) {
-            throw Error('Failed to fetch org info: Invalid id');
+        if (!accOrgInfo) {
+            throw Error('Failed to check flags (No org)');
         }
         let formattedFlags;
         if (accOrgInfo?.active_flags?.length > 0) {
@@ -195,7 +204,7 @@ const updateParams = res => {
                     remaining_days: days
                 };
             }));
-            console.warn('[31mYour account has warnings[0m %o', formattedFlags);
+            console.warn('[31myour account has warnings[0m %o', formattedFlags);
         }
         return formattedFlags || accOrgInfo?.active_flags || [];
     })();
@@ -232,16 +241,15 @@ const updateParams = res => {
             method: 'GET',
             headers: {
                 ...AI.hdr(),
-                Cookie: getCookies(),
-                'anthropic-client-sha': 'unknown',
-                'anthropic-client-version': 'unknown'
+                Cookie: getCookies()
             }
-        }), conversations = await convRes.json();
+        });
         updateParams(convRes);
+        const conversations = await convRes.json();
         if (conversations.length > 0) {
-            console.warn(`[33mwiping[0m [1m${conversations.length}[0m [33mold chats[0m`);
-            const results = await Promise.all(conversations.map((conv => deleteChat(conv.uuid))));
-            console.log(`${200 == results[0] ? '[32m' : '[33m'}${results[0]}![0m\n`);
+            console.warn(`[33mwiping[0m [1m${conversations.length}[0m [33mold conversations[0m`);
+            const deleteInfo = await deleteChat(conversations.map((conv => conv.uuid)));
+            deleteInfo.deleted || deleteInfo.failed ? console.log(`[1m${deleteInfo.deleted?.length}[0m [32mdeleted[0m and [1m${deleteInfo.failed?.length}[0m [33mfailed[0m!\n`) : console.warn('[33mfailed to delete conversations[0m');
         }
     })();
 }, writeSettings = async (config, firstRun = false) => {
@@ -379,20 +387,19 @@ const updateParams = res => {
                             return res;
                         })(signal);
                     } else if (shouldRenew) {
-                        Conversation.uuid && await deleteChat(Conversation.uuid);
+                        Conversation.uuid && await deleteChat([ Conversation.uuid ]);
                         fetchAPI = await (async signal => {
-                            Conversation.uuid = randomUUID().toString();
+                            Conversation.uuid = randomUUID();
                             Conversation.depth = 0;
                             const res = await (Config.Settings.Superfetch ? Superfetch : fetch)(`${AI.end}/api/organizations/${uuidOrg}/chat_conversations`, {
                                 signal,
                                 headers: {
                                     ...AI.hdr(),
-                                    Cookie: getCookies(),
-                                    'anthropic-client-sha': 'unknown',
-                                    'anthropic-client-version': 'unknown'
+                                    Cookie: getCookies()
                                 },
                                 method: 'POST',
                                 body: JSON.stringify({
+                                    include_conversation_preferences: false,
                                     uuid: Conversation.uuid,
                                     name: ''
                                 })
@@ -453,14 +460,14 @@ const updateParams = res => {
                                 extracted_content: prompt,
                                 file_name: fileName(),
                                 file_type: 'text/plain',
-                                file_size: Buffer.from(prompt).byteLength
+                                file_size: Buffer.byteLength(prompt)
                             });
                             prompt = 'r' === type ? Config.PromptExperimentFirst : Config.PromptExperimentNext;
                         }
                         const body = {
                             attachments,
                             files,
-                            sync_sources: [],
+                            locale: 'en-US',
                             ...!isAssignedModel && {
                                 model: modelName
                             },
@@ -472,14 +479,17 @@ const updateParams = res => {
                             },
                             prompt: prompt || '',
                             rendering_mode: 'raw',
-                            timezone: AI.zone()
+                            timezone: AI.zone(),
+                            sync_sources: [],
+                            personalized_styles: [],
+                            tools: []
                         };
                         let headers = {
                             ...AI.hdr(Conversation.uuid || ''),
                             Accept: 'text/event-stream',
                             Cookie: getCookies()
                         };
-                        const res = await (Config.Settings.Superfetch ? Superfetch : fetch)(`${AI.end}/api/organizations/${uuidOrg || ''}/chat_conversations/${Conversation.uuid || ''}/completion`, {
+                        const res = await (Config.Settings.Superfetch ? Superfetch : fetch)(`${AI.end}/api/organizations/${uuidOrg}/chat_conversations/${Conversation.uuid}/completion`, {
                             stream: true,
                             signal,
                             method: 'POST',
@@ -528,7 +538,7 @@ const updateParams = res => {
                     console.log(clewdStream?.remaining <= 10 ? `(remaining [1m${clewdStream.remaining}[0m)\n` : '\n');
                     if (prevImpersonated) {
                         try {
-                            await deleteChat(Conversation.uuid);
+                            await deleteChat([ Conversation.uuid ]);
                         } catch (err) {}
                     }
                 }
@@ -599,7 +609,7 @@ const updateParams = res => {
 const cleanup = async () => {
     console.log('cleaning...');
     try {
-        await deleteChat(Conversation.uuid);
+        await deleteChat([ Conversation.uuid ]);
         SuperfetchFoldersRm();
         Logger?.close();
     } catch (err) {}

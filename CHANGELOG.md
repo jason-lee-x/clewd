@@ -82,6 +82,14 @@ added new model
 
 > **SendImageDepth** added (requires `Send inline images`)
 
+### **Hotfix 6**
+
+added new models
+
+added support for more architectures
+
+fixed some errors
+
 # 4.8
 
 test endpoint

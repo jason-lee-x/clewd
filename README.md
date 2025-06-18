@@ -43,7 +43,7 @@ Warning: Some accounts are getting _hard-censored_ by the **rats**, you might no
     * true trims the bot reply immediately if he says "Human:", "Assistant:", "H:" or "A:"
     * making it so it doesn't hallucinate speaking as you __(chance of missing some spicy things)__
 
- - `PromptExperiments`: (true)/false
+ - `PromptExperiments`: (false)/true
     * true is an alternative way to send your prompt to the AI
     * experiment before setting to false
     * incompatible with `RenewAlways` set to false
@@ -116,7 +116,7 @@ Warning: Some accounts are getting _hard-censored_ by the **rats**, you might no
 
 > **RenewAlways**: true
 
-> **PromptExperiments**: true
+> **PromptExperiments**: false
 
 > **PreserveChats**: true
 
